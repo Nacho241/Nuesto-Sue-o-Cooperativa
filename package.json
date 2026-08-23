@@ -16,7 +16,9 @@
     "react": "latest",
     "react-dom": "latest",
     "wrangler": "latest",
-    "@cloudflare/vite-plugin": "latest"
+    "@cloudflare/vite-plugin": "latest",
+    "jspdf": "^3.0.2",
+    "jspdf-autotable": "^5.0.2"
   },
   "devDependencies": {}
 }
