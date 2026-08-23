@@ -1,0 +1,22 @@
+{
+  "name": "guardias-rotacion-cloudflare",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "deploy": "vite build && wrangler deploy",
+    "db:local": "wrangler d1 execute guardias-db --local --file=./schema.sql",
+    "db:remote": "wrangler d1 execute guardias-db --remote --file=./schema.sql"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "vite": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "wrangler": "latest",
+    "@cloudflare/vite-plugin": "latest"
+  },
+  "devDependencies": {}
+}
