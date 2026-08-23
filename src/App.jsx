@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback } from "react";
+import { jsPDF } from "jspdf";
+import { autoTable } from "jspdf-autotable";
 
 /* ---------- Datos base ---------- */
 
@@ -174,6 +176,131 @@ function estaDisponible(disponibilidad, memberId, slotKey) {
   return m[slotKey] !== false;
 }
 
+
+/* ---------- Historial / PDF ---------- */
+
+const DIA_OFFSET = {
+  Lunes: 0,
+  Martes: 1,
+  Miércoles: 2,
+  Jueves: 3,
+  Viernes: 4,
+  Sábado: 5,
+  Domingo: 6,
+};
+
+function sumarDiasISO(fechaISO, dias) {
+  const d = new Date(fechaISO + "T12:00:00");
+  d.setDate(d.getDate() + dias);
+  return d.toISOString().slice(0, 10);
+}
+
+function fechaUY(fechaISO) {
+  return new Intl.DateTimeFormat("es-UY", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  }).format(new Date(fechaISO + "T12:00:00"));
+}
+
+function registrosHistorial(weeks, memberById) {
+  const registros = [];
+
+  weeks.forEach((week) => {
+    DIAS_LIBRES.forEach((dia) => {
+      const fecha = sumarDiasISO(week.start, DIA_OFFSET[dia]);
+      const ids = (week.freeAssign && week.freeAssign[dia]) || [];
+      ids.forEach((id) => {
+        const m = memberById[id];
+        if (!m) return;
+        registros.push({
+          fecha,
+          dia,
+          horario: horarioLibreDia(week, dia),
+          socio: m.nombre,
+          comision: m.comision || "Sin comisión",
+          tipo: "Rotación",
+          horas: horasLibreDia(week, dia),
+        });
+      });
+    });
+
+    SLOTS.forEach((slot) => {
+      const fecha = sumarDiasISO(week.start, DIA_OFFSET[slot.dia]);
+      const ids = (week.slots && week.slots[slot.key]) || [];
+      ids.forEach((id) => {
+        const m = memberById[id];
+        if (!m) return;
+        registros.push({
+          fecha,
+          dia: slot.dia,
+          horario: slot.horario,
+          socio: m.nombre,
+          comision: m.comision || "Sin comisión",
+          tipo: "Guardia",
+          horas: slot.horas,
+        });
+      });
+    });
+  });
+
+  return registros.sort((a, b) => a.fecha.localeCompare(b.fecha) || a.horario.localeCompare(b.horario) || a.socio.localeCompare(b.socio));
+}
+
+function descargarHistorialPDF(registros, desde, hasta) {
+  const filtrados = registros.filter((r) => r.fecha >= desde && r.fecha <= hasta);
+  const doc = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
+  const totalHoras = filtrados.reduce((s, r) => s + r.horas, 0);
+
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(18);
+  doc.text("Historial de guardias y rotaciones", 14, 16);
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(10);
+  doc.text(`Período: ${fechaUY(desde)} al ${fechaUY(hasta)}`, 14, 23);
+  doc.text(`Registros: ${filtrados.length}  |  Horas asignadas: ${totalHoras}`, 14, 29);
+
+  autoTable(doc, {
+    startY: 35,
+    head: [["Fecha", "Día", "Horario", "Socio", "Comisión", "Tipo", "Horas"]],
+    body: filtrados.map((r) => [
+      fechaUY(r.fecha),
+      r.dia,
+      r.horario,
+      r.socio,
+      r.comision,
+      r.tipo,
+      `${r.horas} hs`,
+    ]),
+    theme: "grid",
+    styles: { font: "helvetica", fontSize: 8, cellPadding: 2 },
+    headStyles: { fillColor: [27, 58, 48], textColor: [246, 243, 236] },
+    alternateRowStyles: { fillColor: [246, 243, 236] },
+    columnStyles: {
+      0: { cellWidth: 24 },
+      1: { cellWidth: 22 },
+      2: { cellWidth: 30 },
+      3: { cellWidth: 48 },
+      4: { cellWidth: 36 },
+      5: { cellWidth: 27 },
+      6: { cellWidth: 18, halign: "right" },
+    },
+    didDrawPage: () => {
+      const page = doc.internal.getNumberOfPages();
+      doc.setFontSize(8);
+      doc.setTextColor(100);
+      doc.text(`Página ${page}`, 282, 202, { align: "right" });
+    },
+  });
+
+  if (!filtrados.length) {
+    doc.setFontSize(11);
+    doc.text("No hay guardias o rotaciones registradas dentro del período seleccionado.", 14, 45);
+  }
+
+  doc.save(`historial-guardias_${desde}_${hasta}.pdf`);
+}
+
 /* ---------- Persistencia ---------- */
 
 async function storageGet(key) {
@@ -254,6 +381,7 @@ export default function App() {
   const [activeWeek, setActiveWeek] = useState(null);
   const [guardando, setGuardando] = useState(false);
   const [guardadoOk, setGuardadoOk] = useState(false);
+  const [exportarAbierto, setExportarAbierto] = useState(false);
 
   const ready = membersLoaded && weeksLoaded && dispoLoaded && comisionesLoaded;
 
@@ -298,6 +426,8 @@ export default function App() {
     members.forEach((m) => (map[m.id] = m));
     return map;
   }, [members]);
+
+  const historialRegistros = useMemo(() => registrosHistorial(weeks, memberById), [weeks, memberById]);
 
   const horasHasta = useCallback((weekId) => {
     const totals = {};
@@ -523,8 +653,14 @@ export default function App() {
 
   return (
     <div style={{ minHeight: "100vh", background: "#F6F3EC", fontFamily: "'Segoe UI', system-ui, sans-serif", color: "#242018" }}>
-      <Header guardarCambios={guardarCambios} guardando={guardando} guardadoOk={guardadoOk} />
+      <Header guardarCambios={guardarCambios} guardando={guardando} guardadoOk={guardadoOk} onExportar={() => setExportarAbierto(true)} />
       <NavTabs tab={tab} setTab={setTab} />
+      {exportarAbierto && (
+        <ExportarPDFModal
+          registros={historialRegistros}
+          onCerrar={() => setExportarAbierto(false)}
+        />
+      )}
       <div style={{ maxWidth: 1080, margin: "0 auto", padding: "0 20px 60px" }}>
         {tab === "miembros" && (
           <MiembrosTab members={members} addMember={addMember} updateMember={updateMember} removeMember={removeMember} comisiones={comisiones} addComision={addComision} />
@@ -565,7 +701,7 @@ export default function App() {
 
 /* ---------- Header & Nav ---------- */
 
-function Header({ guardarCambios, guardando, guardadoOk }) {
+function Header({ guardarCambios, guardando, guardadoOk, onExportar }) {
   return (
     <div style={{ background: "#1B3A30", color: "#F6F3EC", padding: "28px 20px 22px" }}>
       <div style={{ maxWidth: 1080, margin: "0 auto" }}>
@@ -582,18 +718,114 @@ function Header({ guardarCambios, guardando, guardadoOk }) {
           <div style={{ fontSize: 11.5, color: "#C9A24B" }}>
             ● Datos compartidos: todos los que abran este link ven y editan la misma información.
           </div>
-          <button
-            onClick={guardarCambios}
-            disabled={guardando}
-            style={{
-              background: guardadoOk ? "#4E7A5E" : "#C9A24B",
-              color: "#1B3A30", border: "none", borderRadius: 8,
-              padding: "6px 12px", fontSize: 12.5, fontWeight: 700,
-              cursor: guardando ? "wait" : "pointer",
-            }}
-          >
-            {guardando ? "Guardando…" : guardadoOk ? "✓ Guardado" : "💾 Guardar cambios"}
-          </button>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button
+              onClick={onExportar}
+              style={{
+                background: "#F6F3EC", color: "#1B3A30", border: "none", borderRadius: 8,
+                padding: "6px 12px", fontSize: 12.5, fontWeight: 700, cursor: "pointer",
+              }}
+            >
+              Descargar historial PDF
+            </button>
+            <button
+              onClick={guardarCambios}
+              disabled={guardando}
+              style={{
+                background: guardadoOk ? "#4E7A5E" : "#C9A24B",
+                color: "#1B3A30", border: "none", borderRadius: 8,
+                padding: "6px 12px", fontSize: 12.5, fontWeight: 700,
+                cursor: guardando ? "wait" : "pointer",
+              }}
+            >
+              {guardando ? "Guardando…" : guardadoOk ? "✓ Guardado" : "💾 Guardar cambios"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+function ExportarPDFModal({ registros, onCerrar }) {
+  const fechas = registros.map((r) => r.fecha).sort();
+  const hoy = new Date().toISOString().slice(0, 10);
+  const [desde, setDesde] = useState(fechas[0] || hoy);
+  const [hasta, setHasta] = useState(fechas[fechas.length - 1] || hoy);
+  const [error, setError] = useState("");
+
+  const cantidad = registros.filter((r) => r.fecha >= desde && r.fecha <= hasta).length;
+
+  const descargar = () => {
+    if (!desde || !hasta) {
+      setError("Elegí una fecha de inicio y una fecha final.");
+      return;
+    }
+    if (desde > hasta) {
+      setError("La fecha 'Desde' no puede ser posterior a la fecha 'Hasta'.");
+      return;
+    }
+    setError("");
+    descargarHistorialPDF(registros, desde, hasta);
+  };
+
+  return (
+    <div
+      onClick={onCerrar}
+      style={{
+        position: "fixed", inset: 0, background: "rgba(18, 24, 21, 0.58)", zIndex: 1000,
+        display: "flex", alignItems: "center", justifyContent: "center", padding: 20,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: "100%", maxWidth: 520, background: "#F6F3EC", borderRadius: 14,
+          padding: 22, boxShadow: "0 20px 60px rgba(0,0,0,.25)", color: "#242018",
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "start" }}>
+          <div>
+            <div style={{ fontFamily: "Georgia, serif", fontSize: 21, fontWeight: 700, color: "#1B3A30" }}>
+              Descargar historial PDF
+            </div>
+            <div style={{ fontSize: 12.5, color: "#716A5E", marginTop: 5, lineHeight: 1.45 }}>
+              Elegí el período que querés incluir. Se cuentan las guardias y rotaciones asignadas entre ambas fechas, inclusive.
+            </div>
+          </div>
+          <button onClick={onCerrar} style={{ border: "none", background: "transparent", fontSize: 22, cursor: "pointer", color: "#716A5E" }}>×</button>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 20 }}>
+          <label style={{ fontSize: 12.5, fontWeight: 700, color: "#5A5346" }}>
+            Desde
+            <input
+              type="date"
+              value={desde}
+              onChange={(e) => setDesde(e.target.value)}
+              style={{ width: "100%", boxSizing: "border-box", marginTop: 6, border: "1px solid #D9D0BE", borderRadius: 8, padding: "9px 10px", fontSize: 14, background: "#fff" }}
+            />
+          </label>
+          <label style={{ fontSize: 12.5, fontWeight: 700, color: "#5A5346" }}>
+            Hasta
+            <input
+              type="date"
+              value={hasta}
+              onChange={(e) => setHasta(e.target.value)}
+              style={{ width: "100%", boxSizing: "border-box", marginTop: 6, border: "1px solid #D9D0BE", borderRadius: 8, padding: "9px 10px", fontSize: 14, background: "#fff" }}
+            />
+          </label>
+        </div>
+
+        <div style={{ marginTop: 14, padding: "10px 12px", background: "#EAF1EC", borderRadius: 8, fontSize: 12.5, color: "#2E5C4F" }}>
+          {cantidad} registro{cantidad === 1 ? "" : "s"} dentro del período seleccionado.
+        </div>
+        {error && <div style={{ marginTop: 10, color: "#B5482E", fontSize: 12.5 }}>{error}</div>}
+
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 20 }}>
+          <button onClick={onCerrar} style={btnGhost}>Cancelar</button>
+          <button onClick={descargar} style={btnPrimary}>Descargar PDF</button>
         </div>
       </div>
     </div>
